@@ -1,0 +1,393 @@
+---
+title: "Appendix: Case Study Codes"
+author: "Maryam Loni"
+date: "2026-07-08"
+output: html_document
+---
+
+## 1. Data import and preparation
+
+```{r}
+dat <- read.csv2("FEC24-47-1251.csv", stringsAsFactors = FALSE)
+
+# Convert types
+dat$Std   <- as.integer(dat$Std)
+dat$Run   <- as.integer(dat$Run)
+dat$Block <- factor(dat$Block)   # "Block 1", "Block 2"
+
+# Rename factor columns for clarity
+names(dat)[names(dat) == "A.Coating.antibody.concentration"] <- "A_coating"
+names(dat)[names(dat) == "B.Detection.antibody.concentration"] <- "B_detection"
+names(dat)[names(dat) == "C.Sample.incubation.time"]          <- "C_time"
+names(dat)[names(dat) == "D.Conjugate.concentration"]         <- "D_conj"
+
+# Ensure responses are numeric (can be read as character from csv2)
+dat$R1 <- as.numeric(dat$R1)
+dat$R2 <- as.numeric(dat$R2)
+dat$R3 <- as.numeric(dat$R3)
+dat$R4 <- as.numeric(dat$R4)
+
+str(dat)
+```
+
+## 2. Coding factor levels as -1, 0, +1
+
+```{r}
+code_factor <- function(x) {
+  ux <- sort(unique(x))
+  if (length(ux) != 3) stop("Factor must have exactly 3 levels")
+  low  <- ux[1]
+  high <- ux[3]
+  ifelse(x == low, -1,
+         ifelse(x == high, 1, 0))
+}
+
+dat$A_coded <- code_factor(dat$A_coating)
+dat$B_coded <- code_factor(dat$B_detection)
+dat$C_coded <- code_factor(dat$C_time)
+dat$D_coded <- code_factor(dat$D_conj)
+
+head(dat[, c("A_coating","A_coded",
+             "B_detection","B_coded",
+             "C_time","C_coded",
+             "D_conj","D_coded")])
+```
+
+## 3. Equivalence summary table functions
+
+The following two functions compute equivalence tables on the log scale: `summary_table_main_log()` for responses with main-effects-only models (R2-R4), and `summary_table_R1_log()` for R1, which uses contrast vectors to obtain the conditional effects of B and C given the B:C interaction.
+
+```{r}
+summary_table_main_log <- function(fit, response_name, Delta_practical, Delta_sd, alpha = 0.05) {
+  df <- df.residual(fit)
+  crit <- qt(1 - alpha, df)
+
+  beta <- coef(fit)
+  V <- vcov(fit)
+  effects <- c("A_coded", "B_coded", "C_coded", "D_coded")
+
+  out <- lapply(effects, function(term) {
+    est <- beta[term]
+    se  <- sqrt(V[term, term])
+    ci  <- est + c(-1, 1) * crit * se
+    p   <- summary(fit)$coefficients[term, 4]
+
+    equiv_practical <- ifelse(ci[1] > -Delta_practical & ci[2] < Delta_practical,
+                              "Equivalence", "Not equivalent")
+    equiv_sd <- ifelse(ci[1] > -Delta_sd & ci[2] < Delta_sd,
+                       "Equivalence", "Not equivalent")
+
+    low_pct  <- (exp(ci[1]) - 1) * 100
+    high_pct <- (exp(ci[2]) - 1) * 100
+
+    data.frame(
+      Response = response_name,
+      Effect = gsub("_coded", "", term),
+      Estimate_pct = round((exp(est) - 1) * 100, 2),
+      CI_pct = paste0("(", round(low_pct, 2), ", ", round(high_pct, 2), ")"),
+      P_value = round(p, 4),
+      Practical_margin = equiv_practical,
+      Exploratory_margin = equiv_sd,
+      LEAD_pct = max(abs(low_pct), abs(high_pct)),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  do.call(rbind, out)
+}
+```
+
+```{r}
+summary_table_R1_log <- function(fit, contrast_list, Delta_practical, Delta_sd, alpha = 0.05) {
+  df <- df.residual(fit)
+  crit <- qt(1 - alpha, df)
+
+  beta <- coef(fit)
+  V <- vcov(fit)
+
+  out <- lapply(names(contrast_list), function(nm) {
+    L <- contrast_list[[nm]]
+
+    est <- sum(L * beta)
+    se  <- sqrt(as.numeric(t(L) %*% V %*% L))
+    ci  <- est + c(-1, 1) * crit * se
+
+    tval <- est / se
+    p <- 2 * (1 - pt(abs(tval), df))
+
+    equiv_practical <- ifelse(ci[1] > -Delta_practical & ci[2] < Delta_practical,
+                              "Equivalence", "Not equivalent")
+    equiv_sd <- ifelse(ci[1] > -Delta_sd & ci[2] < Delta_sd,
+                       "Equivalence", "Not equivalent")
+
+    low_pct  <- (exp(ci[1]) - 1) * 100
+    high_pct <- (exp(ci[2]) - 1) * 100
+
+    data.frame(
+      Response = "R1",
+      Effect = nm,
+      Estimate_pct = round((exp(est) - 1) * 100, 2),
+      CI_pct = paste0("(", round(low_pct, 2), ", ", round(high_pct, 2), ")"),
+      P_value = round(p, 4),
+      Practical_margin = equiv_practical,
+      Exploratory_margin = equiv_sd,
+      LEAD_pct = max(abs(low_pct), abs(high_pct)),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  out <- do.call(rbind, out)
+
+  # relabel contrast names for readability
+  out$Effect[out$Effect == "A"] <- "Factor A"
+  out$Effect[out$Effect == "D"] <- "Factor D"
+  out$Effect[out$Effect == "C | B=-1"] <- "Factor C (at B low)"
+  out$Effect[out$Effect == "C | B=0"]  <- "Factor C (at B center)"
+  out$Effect[out$Effect == "C | B=+1"] <- "Factor C (at B high)"
+  out$Effect[out$Effect == "B | C=-1"] <- "Factor B (at C low)"
+  out$Effect[out$Effect == "B | C=0"]  <- "Factor B (at C center)"
+  out$Effect[out$Effect == "B | C=+1"] <- "Factor B (at C high)"
+  out$Effect[out$Effect == "BC interaction"] <- "BC"
+
+  out
+}
+```
+
+## 4. Model fitting
+
+```{r}
+fit_R1_log <- lm(log(R1) ~ Block + A_coded + B_coded + C_coded + D_coded
+                 + B_coded * C_coded, data = dat)
+fit_R2_log <- lm(log(R2) ~ Block + A_coded + B_coded + C_coded + D_coded, data = dat)
+fit_R3_log <- lm(log(R3) ~ Block + A_coded + B_coded + C_coded + D_coded, data = dat)
+fit_R4_log <- lm(log(R4) ~ Block + A_coded + B_coded + C_coded + D_coded, data = dat)
+```
+
+## 5. Contrast vectors for R1 (conditional B and C effects)
+
+```{r}
+make_L <- function(fit, ...) {
+  x <- rep(0, length(coef(fit)))
+  names(x) <- names(coef(fit))
+  vals <- c(...)
+  x[names(vals)] <- vals
+  x
+}
+
+contrast_list_R1 <- list(
+  "A" = make_L(fit_R1_log, A_coded = 1),
+  "D" = make_L(fit_R1_log, D_coded = 1),
+
+  "C | B=-1" = make_L(fit_R1_log, C_coded = 1, "B_coded:C_coded" = -1),
+  "C | B=0"  = make_L(fit_R1_log, C_coded = 1),
+  "C | B=+1" = make_L(fit_R1_log, C_coded = 1, "B_coded:C_coded" = 1),
+
+  "B | C=-1" = make_L(fit_R1_log, B_coded = 1, "B_coded:C_coded" = -1),
+  "B | C=0"  = make_L(fit_R1_log, B_coded = 1),
+  "B | C=+1" = make_L(fit_R1_log, B_coded = 1, "B_coded:C_coded" = 1),
+
+  "BC interaction" = make_L(fit_R1_log, "B_coded:C_coded" = 1)
+)
+```
+
+## 6. Equivalence margins and summary tables
+
+```{r}
+Delta_practical <- log(1.25)
+Delta_R1_sd <- log(1.10)
+Delta_R2_sd <- log(1.10)
+Delta_R3_sd <- log(1.10)
+Delta_R4_sd <- log(1.10)
+```
+
+```{r}
+tab_R1 <- summary_table_R1_log(
+  fit = fit_R1_log, contrast_list = contrast_list_R1,
+  Delta_practical = Delta_practical, Delta_sd = Delta_R1_sd, alpha = 0.05
+)
+tab_R2 <- summary_table_main_log(
+  fit = fit_R2_log, response_name = "R2",
+  Delta_practical = Delta_practical, Delta_sd = Delta_R2_sd, alpha = 0.05
+)
+tab_R3 <- summary_table_main_log(
+  fit = fit_R3_log, response_name = "R3",
+  Delta_practical = Delta_practical, Delta_sd = Delta_R3_sd, alpha = 0.05
+)
+tab_R4 <- summary_table_main_log(
+  fit = fit_R4_log, response_name = "R4",
+  Delta_practical = Delta_practical, Delta_sd = Delta_R4_sd, alpha = 0.05
+)
+
+final_summary_table <- rbind(tab_R1, tab_R2, tab_R3, tab_R4)
+final_summary_table
+```
+
+```{r}
+summary(fit_R1_log); summary(fit_R2_log); summary(fit_R3_log); summary(fit_R4_log)
+```
+
+## 7. Response distributions (raw and log scale)
+
+```{r}
+resp <- c("R1", "R2", "R3", "R4")
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+dat_long <- dat %>%
+  pivot_longer(cols = all_of(resp), names_to = "response", values_to = "value")
+
+ggplot(dat_long, aes(x = value)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 6,
+                 fill = "grey85", color = "grey30") +
+  geom_density(color = "steelblue", linewidth = 1) +
+  facet_wrap(~response, scales = "free") +
+  theme_bw() +
+  labs(title = "Response distributions (raw scale)", x = NULL, y = "Density")
+
+dat_long_log <- dat_long %>% mutate(value_log = log(value))
+
+ggplot(dat_long_log, aes(x = value_log)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 6,
+                 fill = "grey85", color = "grey30") +
+  geom_density(color = "darkgreen", linewidth = 1) +
+  facet_wrap(~response, scales = "free") +
+  theme_bw() +
+  labs(title = "Response distributions (log scale)", x = "log(response)", y = "Density")
+```
+
+## 8. Lack-of-fit / pure error ANOVA table
+
+```{r}
+anova_lof_table <- function(dat, response, fit, factors = c("A_coded", "B_coded", "C_coded", "D_coded")) {
+
+  dat2 <- dat %>%
+    mutate(y = log(.data[[response]])) %>%
+    filter(!is.na(y))
+
+  dat2$design_id <- interaction(dat2[, c(factors, "Block")], drop = TRUE)
+
+  # pure error from replicated design points (center points)
+  pe_tab <- dat2 %>%
+    group_by(design_id) %>%
+    summarise(n = n(), ybar = mean(y), ss_pe = sum((y - ybar)^2), .groups = "drop")
+
+  SS_PE <- sum(pe_tab$ss_pe)
+  df_PE <- sum(pe_tab$n - 1)
+
+  SSE <- sum(resid(fit)^2)
+  df_E <- df.residual(fit)
+
+  SS_LOF <- SSE - SS_PE
+  df_LOF <- df_E - df_PE
+  MS_LOF <- SS_LOF / df_LOF
+  MS_PE  <- SS_PE / df_PE
+  F_LOF  <- MS_LOF / MS_PE
+  p_LOF  <- 1 - pf(F_LOF, df_LOF, df_PE)
+
+  a <- anova(fit)
+  term_rows  <- rownames(a) != "Residuals"
+  term_names <- rownames(a)[term_rows]
+
+  model_ss <- sum(a[term_rows, "Sum Sq"], na.rm = TRUE)
+  model_df <- sum(a[term_rows, "Df"], na.rm = TRUE)
+  model_ms <- model_ss / model_df
+  model_f  <- model_ms / a["Residuals", "Mean Sq"]
+  model_p  <- 1 - pf(model_f, model_df, a["Residuals", "Df"])
+
+  y_mean <- mean(dat2$y, na.rm = TRUE)
+  SST <- sum((dat2$y - y_mean)^2, na.rm = TRUE)
+  df_total <- nrow(dat2) - 1
+
+  data.frame(
+    Source = c("Model", term_names, "Residual", "Lack of Fit", "Pure Error", "Corrected Total"),
+    `Sum of Squares` = c(model_ss, a[term_rows, "Sum Sq"], SSE, SS_LOF, SS_PE, SST),
+    df = c(model_df, a[term_rows, "Df"], df_E, df_LOF, df_PE, df_total),
+    `Mean Square` = c(model_ms, a[term_rows, "Sum Sq"] / a[term_rows, "Df"],
+                       a["Residuals", "Mean Sq"], MS_LOF, MS_PE, NA),
+    `F-value` = c(model_f, a[term_rows, "Mean Sq"] / a["Residuals", "Mean Sq"], NA, F_LOF, NA, NA),
+    `p-value` = c(model_p, a[term_rows, "Pr(>F)"], NA, p_LOF, NA, NA),
+    stringsAsFactors = FALSE
+  )
+}
+```
+
+```{r}
+library(flextable)
+anova_R1_log <- anova_lof_table(dat = dat, response = "R1", fit = fit_R1_log)
+anova_R2_log <- anova_lof_table(dat = dat, response = "R2", fit = fit_R2_log)
+anova_R3_log <- anova_lof_table(dat = dat, response = "R3", fit = fit_R3_log)
+anova_R4_log <- anova_lof_table(dat = dat, response = "R4", fit = fit_R4_log)
+
+flextable(anova_R1_log)
+flextable(anova_R2_log)
+flextable(anova_R3_log)
+flextable(anova_R4_log)
+```
+
+## 9. Curvature test (center vs. corner points)
+
+```{r}
+curvature_test <- function(dat, response) {
+  y <- log(dat[[response]])
+
+  center_vals <- y[dat$A_coded == 0 & dat$B_coded == 0 & dat$C_coded == 0 & dat$D_coded == 0]
+  corner_vals <- y[abs(dat$A_coded) == 1 & abs(dat$B_coded) == 1 & abs(dat$C_coded) == 1 & abs(dat$D_coded) == 1]
+
+  n_c <- length(center_vals)
+  n_f <- length(corner_vals)
+
+  ybar_c <- mean(center_vals, na.rm = TRUE)
+  ybar_f <- mean(corner_vals, na.rm = TRUE)
+
+  SS_curv <- (n_f * n_c * (ybar_f - ybar_c)^2) / (n_f + n_c)
+
+  SS_PE_center <- sum((center_vals - mean(center_vals, na.rm = TRUE))^2, na.rm = TRUE)
+  df_PE_center <- length(center_vals) - 1
+  MS_PE_center <- SS_PE_center / df_PE_center
+
+  F_curv <- SS_curv / MS_PE_center
+  p_curv <- 1 - pf(F_curv, 1, df_PE_center)
+
+  data.frame(
+    Response = response,
+    Mean_center = ybar_c,
+    Mean_corner = ybar_f,
+    SS_curvature = SS_curv,
+    MS_pure_error = MS_PE_center,
+    df_pure_error = df_PE_center,
+    F = F_curv,
+    p_value = p_curv
+  )
+}
+
+curv_results <- do.call(rbind, lapply(c("R1", "R2", "R3", "R4"), function(r) curvature_test(dat, r)))
+curv_results
+```
+
+## 10. Coefficient of variation at center points
+
+```{r}
+center_points <- dat[dat$A_coded == 0 & dat$B_coded == 0 &
+                     dat$C_coded == 0 & dat$D_coded == 0, ]
+
+cv_lognormal <- function(x) {
+  x <- x[!is.na(x) & x > 0]
+  if (length(x) < 2) return(NA_real_)
+  s2 <- var(log(x))
+  100 * sqrt(exp(s2) - 1)
+}
+
+cv_results <- data.frame(
+  Response = c("R1", "R2", "R3", "R4"),
+  CV_percent = c(
+    cv_lognormal(center_points$R1),
+    cv_lognormal(center_points$R2),
+    cv_lognormal(center_points$R3),
+    cv_lognormal(center_points$R4)
+  )
+)
+
+cv_results
+```

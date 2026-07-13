@@ -1,0 +1,367 @@
+---
+title: "Appendix: Simulation Codes"
+author: "Maryam Loni"
+date: "2026-07-08"
+output: html_document
+---
+
+## 1. Simulation comparing superiority and equivalence testing (with block sensitivity)
+
+```{r}
+set.seed(123)
+
+# -----------------------------
+# 1. Design
+# -----------------------------
+corner_design <- expand.grid(
+  A = c(-1, 1),
+  B = c(-1, 1),
+  C = c(-1, 1),
+  D = c(-1, 1)
+)
+# ABCD defining-contrast blocking scheme, orthogonal to A-D
+corner_design$block <- ifelse(corner_design$A * corner_design$B * corner_design$C * corner_design$D > 0, 1, 2)
+
+center_points <- data.frame(
+  A = 0, B = 0, C = 0, D = 0,
+  block = rep(c(1, 2), each = 4)
+)
+design <- rbind(corner_design, center_points)
+design$block <- factor(design$block)
+
+# -----------------------------
+# 2. Simulation settings
+# -----------------------------
+n_sim <- 10000
+true_effects  <- c(0, 0.10, 0.20, 0.30)
+sigmas        <- c(0.08, 0.10, 0.13, 0.15)
+alphas        <- c(0.025, 0.05)
+block_effects <- c(0, 0.05)          # no block effect vs. a real block effect
+log_beta_0    <- log(375)
+margin_practical <- log(1.25)
+margin_sd        <- 0.10
+results_all <- data.frame()
+
+# -----------------------------
+# 3. Simulation loop
+# -----------------------------
+for (true_block_eff in block_effects) {
+  for (true_eff in true_effects) {
+    for (log_sigma in sigmas) {
+      for (alpha in alphas) {
+
+        log_beta_C <- log(1 + true_eff)  # center-to-high effect on log scale
+
+        detect_C <- numeric(n_sim)
+        equiv_C_practical <- numeric(n_sim)
+        equiv_C_sd <- numeric(n_sim)
+        estimate_C <- numeric(n_sim)
+        ci_low_C <- numeric(n_sim)
+        ci_high_C <- numeric(n_sim)
+        estimate_pct <- numeric(n_sim)
+        ci_low_pct <- numeric(n_sim)
+        ci_high_pct <- numeric(n_sim)
+        ci_width_pct <- numeric(n_sim)
+        lead_log <- numeric(n_sim)
+        lead_pct <- numeric(n_sim)
+
+        for (i in 1:n_sim) {
+          # simulate response on log scale, including a true block effect
+          log_Y <- log_beta_0 +
+            log_beta_C * design$C +
+            true_block_eff * (design$block == 2) +
+            rnorm(nrow(design), mean = 0, sd = log_sigma)
+
+          fit <- lm(log_Y ~ A + B + C + D + block, data = design)
+
+          # superiority test for factor C
+          pvals <- summary(fit)$coefficients[, 4]
+          detect_C[i] <- ifelse(pvals["C"] < alpha, 1, 0)
+
+          # equivalence: (1 - 2*alpha) CI, per TOST convention
+          ci_level <- 1 - 2 * alpha
+          ci <- confint(fit, level = ci_level)
+          estimate_C[i] <- coef(fit)["C"]
+          ci_low_C[i]   <- ci["C", 1]
+          ci_high_C[i]  <- ci["C", 2]
+
+          equiv_C_practical[i] <- ci_low_C[i] > -margin_practical & ci_high_C[i] < margin_practical
+          equiv_C_sd[i]        <- ci_low_C[i] > -margin_sd & ci_high_C[i] < margin_sd
+
+          # convert to percent scale
+          estimate_pct[i] <- (exp(estimate_C[i]) - 1) * 100
+          ci_low_pct[i]   <- (exp(ci_low_C[i]) - 1) * 100
+          ci_high_pct[i]  <- (exp(ci_high_C[i]) - 1) * 100
+          ci_width_pct[i] <- ci_high_pct[i] - ci_low_pct[i]
+
+          # LEAD: smallest symmetric margin that would contain the CI
+          lead_log[i] <- max(abs(ci_low_C[i]), abs(ci_high_C[i]))
+          lead_pct[i] <- (exp(lead_log[i]) - 1) * 100
+        }
+
+        temp <- data.frame(
+          true_block_effect = true_block_eff,
+          true_effect_pct = true_eff * 100,
+          sigma = log_sigma,
+          alpha = alpha,
+          superiority_rate = mean(detect_C) * 100,
+          equivalence_practical = mean(equiv_C_practical) * 100,
+          equivalence_sd = mean(equiv_C_sd) * 100,
+          mean_estimate_log = mean(estimate_C),
+          mean_ci_low_log = mean(ci_low_C),
+          mean_ci_high_log = mean(ci_high_C),
+          mean_ci_width_log = mean(ci_high_C - ci_low_C),
+          mean_estimate_pct = mean(estimate_pct),
+          mean_ci_low_pct = mean(ci_low_pct),
+          mean_ci_high_pct = mean(ci_high_pct),
+          mean_ci_width_pct = mean(ci_width_pct),
+          mean_LEAD_log = mean(lead_log),
+          mean_LEAD_pct = mean(lead_pct)
+        )
+        results_all <- rbind(results_all, temp)
+      }
+    }
+  }
+}
+
+results_all
+write.csv(results_all, "simulation_results_main_effects_with_block_sensitivity.csv", row.names = FALSE)
+```
+
+## 2. Sample size and power simulation
+
+```{r}
+set.seed(123)
+
+# -----------------------------
+# Fixed assumptions
+# -----------------------------
+target_power  <- 0.90
+sigma_assumed <- 0.10     # matches observed ~10% CV at center points (Table 3)
+alpha         <- 0.05
+n_sim         <- 10000
+log_beta_0    <- log(375)
+true_effects  <- c(0, 0.05)
+
+margins <- c(
+  biologically_relevant = log(1.25),
+  exploratory            = log(1.10)
+)
+
+corner_design <- expand.grid(A = c(-1, 1), B = c(-1, 1), C = c(-1, 1), D = c(-1, 1))
+corner_design$block <- rep(c(1, 2), times = 8)
+
+candidate_k <- seq(2, 60, by = 2)   # center points per block to search over
+
+# -----------------------------
+# Simulation loop
+# -----------------------------
+power_results <- data.frame()
+
+for (margin_name in names(margins)) {
+  margin_value <- margins[[margin_name]]
+
+  for (true_eff in true_effects) {
+    log_beta_C <- log(1 + true_eff)
+
+    for (k in candidate_k) {
+      center_points <- data.frame(A = 0, B = 0, C = 0, D = 0, block = rep(c(1, 2), each = k))
+      design <- rbind(corner_design, center_points)
+      design$block <- factor(design$block)
+
+      equiv <- numeric(n_sim)
+      for (i in 1:n_sim) {
+        log_Y <- log_beta_0 + log_beta_C * design$C +
+          rnorm(nrow(design), mean = 0, sd = sigma_assumed)
+        fit <- lm(log_Y ~ A + B + C + D + block, data = design)
+        ci <- confint(fit, level = 1 - 2 * alpha)
+        equiv[i] <- ci["C", 1] > -margin_value & ci["C", 2] < margin_value
+      }
+
+      power_results <- rbind(power_results, data.frame(
+        margin             = margin_name,
+        true_effect_pct    = true_eff * 100,
+        n_center_per_block = k,
+        N_total            = nrow(design),
+        power_pct          = mean(equiv) * 100
+      ))
+    }
+  }
+}
+
+power_results
+
+# Smallest sample size reaching target power, per margin x true effect
+required <- do.call(rbind, lapply(
+  split(power_results, list(power_results$margin, power_results$true_effect_pct)),
+  function(df) {
+    hit <- df[df$power_pct >= target_power * 100, ]
+    if (nrow(hit) == 0) {
+      data.frame(margin = df$margin[1], true_effect_pct = df$true_effect_pct[1],
+                 n_center_per_block = NA, N_total = NA, power_pct = NA)
+    } else {
+      hit[1, ]
+    }
+  }
+))
+required
+
+write.csv(power_results, "power_results_by_margin_and_effect.csv", row.names = FALSE)
+```
+
+## 3. Block sensitivity summary
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+block_comparison <- results_all %>%
+  select(true_block_effect, true_effect_pct, sigma, alpha,
+         superiority_rate, equivalence_practical) %>%
+  pivot_wider(
+    names_from = true_block_effect,
+    values_from = c(superiority_rate, equivalence_practical),
+    names_prefix = "block_"
+  ) %>%
+  mutate(
+    diff_superiority = superiority_rate_block_0.05 - superiority_rate_block_0,
+    diff_equivalence = equivalence_practical_block_0.05 - equivalence_practical_block_0
+  )
+
+block_comparison
+```
+
+## 4. Result plots
+
+The code below produces the equivalence-rate and superiority-rate plots (Figures showing decision rates by true effect, block scenario, and variability). 
+
+```{r}
+library(ggplot2)
+
+ggplot(results_all %>% filter(alpha == 0.05),
+       aes(x = true_effect_pct, y = equivalence_practical,
+           color = factor(true_block_effect), linetype = factor(sigma))) +
+  geom_line() +
+  geom_point() +
+  labs(
+    x = "True effect (%)",
+    y = "Equivalence rate (%)",
+    color = "True block effect",
+    linetype = "Sigma",
+    title = "Equivalence rate by true effect, block scenario, and variability"
+  ) +
+  theme_bw()
+```
+
+```{r}
+ggplot(results_all %>% filter(alpha == 0.05),
+       aes(x = true_effect_pct, y = superiority_rate,
+           color = factor(true_block_effect), linetype = factor(sigma))) +
+  geom_line() +
+  geom_point() +
+  labs(
+    x = "True effect (%)",
+    y = "Superiority detection rate (%)",
+    color = "True block effect",
+    linetype = "Sigma",
+    title = "Superiority detection rate by true effect, block scenario, and variability"
+  ) +
+  theme_bw()
+```
+
+### Comparison of superiority and equivalence decisions (representative version, alpha = 0.05, exploratory margin)
+
+```{r}
+library(tidyr)
+
+results_binary <- results_all
+results_binary$not_equiv_sd <- 100 - results_binary$equivalence_sd
+
+plot_dat_sd_005 <- subset(results_binary, alpha == 0.05)[, c(
+  "true_effect_pct", "sigma", "superiority_rate", "not_equiv_sd"
+)]
+
+plot_dat_sd_005 <- pivot_longer(
+  plot_dat_sd_005,
+  cols = c("superiority_rate", "not_equiv_sd"),
+  names_to = "Decision",
+  values_to = "Rate"
+)
+
+plot_dat_sd_005$Decision <- factor(
+  plot_dat_sd_005$Decision,
+  levels = c("superiority_rate", "not_equiv_sd"),
+  labels = c("Superiority: effect detected", "Equivalence: not equivalent")
+)
+
+p_sd_005 <- ggplot(plot_dat_sd_005,
+                   aes(x = true_effect_pct, y = Rate,
+                       color = Decision, group = Decision)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2.8) +
+  facet_wrap(~ sigma, labeller = label_bquote(sigma == .(sigma))) +
+  scale_x_continuous(breaks = c(0, 10, 20, 30)) +
+  scale_y_continuous(limits = c(0, 100)) +
+  labs(
+    title = "Comparison of superiority and equivalence decisions",
+    subtitle = "exploratory margin (+/-0.10 on log scale), alpha = 0.05",
+    x = "True effect (%)",
+    y = "Decision probability (%)",
+    color = "Decision"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "bottom"
+  )
+
+p_sd_005
+```
+
+*(The same code, with `alpha == 0.025` and/or `equivalence_practical` in place of `equivalence_sd`, was used to generate the remaining alpha/margin combinations of this figure.)*
+
+### Average confidence intervals and LEAD values (representative version, alpha = 0.025)
+
+```{r}
+plot_dat_lead_0025 <- subset(results_all, alpha == 0.025)
+
+upper_sd_pct <- (exp(0.10) - 1) * 100
+lower_sd_pct <- (exp(-0.10) - 1) * 100
+upper_practical_pct <- (exp(log(1.25)) - 1) * 100
+lower_practical_pct <- (exp(-log(1.25)) - 1) * 100
+
+p_lead_0025 <- ggplot(
+  plot_dat_lead_0025,
+  aes(x = true_effect_pct, y = mean_estimate_pct)
+) +
+  geom_hline(yintercept = 0, linetype = "dotted", color = "black", linewidth = 0.7) +
+  geom_hline(yintercept = lower_sd_pct, linetype = "dashed", color = "red", linewidth = 0.8) +
+  geom_hline(yintercept = upper_sd_pct, linetype = "dashed", color = "red", linewidth = 0.8) +
+  geom_hline(yintercept = lower_practical_pct, linetype = "dashed", color = "darkgreen", linewidth = 0.8) +
+  geom_hline(yintercept = upper_practical_pct, linetype = "dashed", color = "darkgreen", linewidth = 0.8) +
+  geom_errorbar(aes(ymin = mean_ci_low_pct, ymax = mean_ci_high_pct), width = 1.2, linewidth = 0.8) +
+  geom_point(size = 3, color = "black") +
+  geom_text(
+    aes(y = mean_ci_high_pct + 3, label = paste0(round(mean_LEAD_pct, 1), "%")),
+    color = "blue", size = 2.5
+  ) +
+  facet_wrap(~ sigma, nrow = 1, labeller = label_bquote(sigma == .(sigma))) +
+  scale_x_continuous(breaks = c(0, 10, 20, 30)) +
+  labs(
+    title = "Average confidence intervals and LEAD values",
+    subtitle = "Blue labels indicate the minimum equivalence margin required (LEAD)\nRed dashed lines: +/-0.10 log margin; green dashed lines: 0.80-1.25 practical margin",
+    x = "True effect (%)",
+    y = "Estimated effect and confidence interval (%)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    panel.grid.minor = element_blank()
+  )
+
+p_lead_0025
+```
+
+*(The same code, with `alpha == 0.05`, was used to generate the corresponding figure for alpha = 0.05.)*
