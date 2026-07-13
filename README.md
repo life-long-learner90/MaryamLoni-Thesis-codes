@@ -1,5 +1,5 @@
 # MaryamLoni-Thesis-codes
-Evaluating Robustness of Antigenic Mass ELISAs: From Superiority Testing to Equivalence-Based Decisions
+From Superiority Testing to Equivalence-Based Decisions to Evaluate Robustness of Biological Assays
 
 R code accompanying this MSc thesis (Statistics and Data Science, Leiden University).
 
